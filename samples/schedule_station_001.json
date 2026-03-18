@@ -1,0 +1,48 @@
+{
+  "station_code": "STN001",
+  "start": "2026-03-18T00:00:00Z",
+  "end": "2026-03-19T00:00:00Z",
+  "total_candidates": 124,
+  "total_selected": 103,
+  "selected_passes": [
+    {
+      "id": 1,
+      "station_id": 1,
+      "satellite_id": 25544,
+      "tle_snapshot_id": 101,
+      "aos": "2026-03-18T01:02:14Z",
+      "los": "2026-03-18T01:11:42Z",
+      "tca": "2026-03-18T01:06:53Z",
+      "max_elevation_deg": 61.4,
+      "duration_seconds": 568.0,
+      "aos_azimuth_deg": 213.2,
+      "los_azimuth_deg": 44.7
+    },
+    {
+      "id": 4,
+      "station_id": 1,
+      "satellite_id": 39444,
+      "tle_snapshot_id": 104,
+      "aos": "2026-03-18T05:01:20Z",
+      "los": "2026-03-18T05:07:36Z",
+      "tca": "2026-03-18T05:04:17Z",
+      "max_elevation_deg": 35.5,
+      "duration_seconds": 376.0,
+      "aos_azimuth_deg": 204.5,
+      "los_azimuth_deg": 65.4
+    },
+    {
+      "id": 7,
+      "station_id": 1,
+      "satellite_id": 27651,
+      "tle_snapshot_id": 107,
+      "aos": "2026-03-18T10:27:14Z",
+      "los": "2026-03-18T10:34:40Z",
+      "tca": "2026-03-18T10:30:38Z",
+      "max_elevation_deg": 41.6,
+      "duration_seconds": 446.0,
+      "aos_azimuth_deg": 208.1,
+      "los_azimuth_deg": 48.9
+    }
+  ]
+}

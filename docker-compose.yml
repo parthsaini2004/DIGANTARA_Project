@@ -1,0 +1,50 @@
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_DB: passes
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d passes"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/passes
+      REDIS_URL: redis://redis:6379/0
+      TLE_SOURCE_URL: https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle
+      PREDICTION_DAYS: 7
+      TIME_STEP_SECONDS: 60
+      MINIMUM_PASS_SECONDS: 5
+      HORIZON_DEGREES: 0.0
+      TLE_REFRESH_HOURS: 24
+      WORKER_PROCESSES: 2
+      SATELLITE_CHUNK_SIZE: 20
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  timescaledb_data:

@@ -1,0 +1,23 @@
+{
+  "start": "2026-03-18T00:00:00Z",
+  "end": "2026-03-19T00:00:00Z",
+  "total_satellites_with_passes": 1834,
+  "total_passes": 6127,
+  "unique_satellites_visible_network_wide": 1834,
+  "scheduled_total_passes_network_wide": 1502,
+  "scheduled_unique_satellites_network_wide": 1268,
+  "passes_per_station": {
+    "STN001": 124,
+    "STN002": 117,
+    "STN003": 121,
+    "STN004": 128,
+    "STN005": 119
+  },
+  "scheduled_passes_per_station": {
+    "STN001": 103,
+    "STN002": 97,
+    "STN003": 102,
+    "STN004": 106,
+    "STN005": 100
+  }
+}
