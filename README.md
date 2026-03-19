@@ -1,294 +1,177 @@
 # Ground Pass Prediction Backend
 
-## Overview
-This project is a backend prototype for predicting satellite visibility passes over a network of ground stations and exposing those results through an API.
+## Deliverables
 
-It fetches live TLE data from CelesTrak, propagates satellite motion for the next seven days using SGP4, computes pass windows over 50 predefined ground stations, stores those passes in TimescaleDB, and provides query, scheduling, and operational status endpoints through FastAPI.
+- Full codebase — self-contained, runnable via `docker compose up --build`
+- This document — thinking process, architecture, implementation strategy, assumed parameters
+- Sample outputs — see [`samples/`](./samples/)
+- `ARCHITECTURE.md` — deeper design notes and scalability roadmap
 
-The submission is built to demonstrate backend engineering across these areas:
-- automated external data ingestion
-- orbital propagation
-- geometric visibility computation
-- time-series storage design
-- scheduling logic
-- operational startup orchestration
-- API design and documentation
+---
 
-## Problem It Solves
-The system answers a practical tracking question:
-- which satellites will be visible from which stations
-- when those passes begin and end
-- how much of the satellite population can be covered by the network under non-overlapping tracking constraints
+## Thinking Process
 
-This is relevant to space domain awareness because pass opportunities are time-bounded, geometry-dependent, and operationally constrained by station availability.
+### Core Philosophy: Vectorization Over Loops
+Pass prediction for 50 stations over 7 days involves tens of millions of geometric comparisons. A scalar Python loop would be too slow. The solution batches all propagation calls using `sgp4_array()` over a NumPy time grid, reducing interpreter overhead significantly.
 
-## Scope
-The repository covers:
-- active-satellite TLE ingestion from CelesTrak
-- 50 predefined ground stations
-- 7-day orbit propagation
-- pass prediction for each station-satellite pairing
-- filtering out passes shorter than 5 seconds
-- pass storage in TimescaleDB
-- APIs for health, progress, passes, schedules, and network summary
-- automated startup from `docker compose up`
+### Coarse-then-Refine Search
+Scanning every second for 7 days is expensive for a prototype. The system uses a **60-second coarse scan** to find candidate horizon crossings, then a **1-second refinement** around each crossing edge. This maintains 1-second AOS/LOS accuracy while keeping computation tractable.
 
-The repository does not try to be a full distributed production system. It keeps the architecture intentionally compact and documents how it can scale further.
+### Pre-computation for Sub-second Queries
+On-the-fly pass calculation during a user query would never meet sub-second targets at scale. All passes for the 7-day window are computed once in the background and stored in TimescaleDB. Queries become simple indexed lookups.
 
-## What The System Does
-At startup the service:
-1. waits for Postgres and Redis
-2. runs database migrations
-3. seeds ground stations if needed
-4. fetches TLEs if data is missing or stale
-5. starts background pass computation
-6. starts a 24-hour refresh scheduler
+### Storage-Centric Thinking
+I chose TimescaleDB because the dominant workload is time-window queries (e.g., "give me passes for station X between time A and B"). TimescaleDB's hypertable partitioning on `aos` ensures these queries touch only relevant data chunks and keep index sizes small.
 
-The API remains available while the initial pass backfill is running.
+---
 
-## Core Concepts
-### TLE
-A TLE, or Two-Line Element set, is the compact orbital data format used by the system as the input for orbit propagation.
+## Assumed Parameters
 
-### SGP4
-SGP4 is the orbital propagation model used to estimate satellite positions and velocities from TLE data.
+| Parameter | Assumed Value | Rationale |
+|---|---|---|
+| TLE Source | CelesTrak Active Satellites feed | Standard professional source; "active" TLEs are more frequently updated |
+| Prediction Horizon | 7 days | As stated in the problem statement |
+| Coarse Sampling Step | 60 seconds | Balances pass-discovery coverage with CPU time |
+| Refinement Resolution | 1 second | Required for precise AOS/LOS scheduling |
+| Minimum Pass Duration | 5 seconds | Practical threshold; shorter passes are noise for acquisition |
+| Horizon Cutoff | 0.0 degrees elevation | Geometric visibility, no terrain masking |
+| Atmospheric Refraction | Not modelled | Out of scope for a backend prototype |
+| Station Altitude | 0.0 metres (sea level) | Seed data uses globally distributed stations without elevation data |
+| CPU Worker Processes | 4 | Reasonable default for a single Docker host node |
+| Multi-tenancy / Auth | Out of scope | Single operational network, no user management required |
+| Station Count | 50 predefined stations | Seeded from internal JSON; coordinates cover all major geographic regions |
 
-### Ground Pass
-A pass is the interval during which a satellite is above the local horizon of a ground station.
+---
 
-Stored pass fields include:
-- `aos`
-- `los`
-- `tca`
-- `max_elevation_deg`
-- `duration_seconds`
-- optional AOS and LOS azimuths
+## Software Architecture
 
-### Hypertable
-The `passes` table is stored as a TimescaleDB hypertable partitioned on `aos`, because the main workload is time-window querying.
-
-### Interval Scheduling
-A ground station cannot track overlapping passes simultaneously. The system uses greedy interval scheduling per station to select the maximum number of non-overlapping passes.
-
-### Network Coverage Heuristic
-The PDF asks for maximizing trackable objects through the network. The project reports network-wide scheduled coverage using a greedy heuristic over already-feasible station schedules. It prioritizes earliest-finishing passes while avoiding repeat coverage of the same satellite where possible.
-
-## Architecture
 ### Services
-The project runs three containers:
-- `api`: FastAPI app, startup orchestration, scheduler, and compute trigger
-- `db`: TimescaleDB/PostgreSQL
-- `redis`: lock coordination and status storage
+
+The system runs three containers:
+
+| Container | Role |
+|---|---|
+| `api` | FastAPI application, startup orchestration, APScheduler, compute trigger |
+| `db` | TimescaleDB (PostgreSQL + timescaledb extension) |
+| `redis` | Distributed lock and job-status cache |
+
+### Architecture Diagram
+
+```
+                         ┌──────────────────────┐
+                         │    CelesTrak API      │
+                         │  (Active TLE Feed)    │
+                         └──────────┬───────────┘
+                                    │ HTTP fetch
+                                    ▼
+┌───────────────────────────────────────────────────────────────┐
+│                        API Container (FastAPI)                │
+│                                                               │
+│  ┌─────────────────┐   ┌──────────────────┐  ┌────────────┐  │
+│  │ Request Handler │   │   Orchestrator   │  │ Scheduler  │  │
+│  │ (Pydantic schemas)│←→│ (job lifecycle)  │  │(APScheduler│  │
+│  └────────┬────────┘   └────────┬─────────┘  └────────────┘  │
+│           │                     │                             │
+│           │           ┌─────────▼──────────┐                 │
+│           └──────────►│  Pass Compute Engine│                 │
+│                       │ ProcessPoolExecutor │                 │
+│                       │  Vectorized SGP4   │                 │
+│                       └─────────┬──────────┘                 │
+└─────────────────────────────────┼─────────────────────────────┘
+                                  │
+              ┌───────────────────┼───────────────────┐
+              ▼                   ▼                   ▼
+    ┌──────────────┐    ┌──────────────────┐   ┌───────────┐
+    │    Redis     │    │   TimescaleDB    │   │  Volumes  │
+    │ (lock, state)│    │  (hypertables)   │   │           │
+    └──────────────┘    └──────────────────┘   └───────────┘
+```
 
 ### Data Flow
-```text
-CelesTrak
-   |
-   v
-TLE Fetcher
-   |
-   v
-TimescaleDB <-> Pass Computation Pipeline <-> Scheduler
-   |                                        |
-   +---------------- FastAPI ---------------+
-                     |
-                     v
-                   Redis
+
+```
+CelesTrak → TLE Fetcher → DB (tle_snapshots, satellites)
+                                      ↓
+                         Pass Computation Pipeline
+                         (ProcessPoolExecutor, SGP4)
+                                      ↓
+                         DB (passes hypertable)
+                                      ↓
+                              FastAPI endpoints
 ```
 
-### Why This Architecture
-- FastAPI gives a clean request/response layer and schema validation
-- TimescaleDB matches the time-series nature of pass data
-- Redis is enough for lightweight state and locking
-- APScheduler handles periodic refresh without extra infrastructure
-- `ProcessPoolExecutor` provides multi-process computation while keeping deployment simple
+---
 
-## Repository Structure
-```text
-app/
-  main.py
-  config.py
-  database.py
-  models.py
-  schemas.py
-  seeds/ground_stations.json
-  services/
-    orchestration.py
-    tle.py
-    pass_prediction.py
-    scheduling.py
-    status.py
-    redis_state.py
-alembic/
-samples/
-tests/
-README.md
-ARCHITECTURE.md
-docker-compose.yml
-Dockerfile
-requirements.txt
-```
+## Implementation Strategy
 
-## Data Model
-### `ground_stations`
-Stores the station catalog with a unique `station_code` for idempotent seeding.
+### Phase 1 — TLE Ingestion
+Fetch the CelesTrak active catalog. Parse each TLE block into `(name, norad_id, line1, line2, epoch)`. Upsert `satellites` and `tle_snapshots`. Mark the newest snapshot as current. A 24-hour APScheduler job refreshes TLEs automatically.
 
-### `satellites`
-Stores one logical row per NORAD object.
+### Phase 2 — Vectorized Propagation
+Build a NumPy time grid for the 7-day window at 60-second intervals. For each satellite, call `sgp4_array()` to propagate ECI positions in bulk. Convert ECI → ECEF using the GMST rotation matrix at each timestep.
 
-### `tle_snapshots`
-Stores versioned TLE history with a current snapshot marker.
+### Phase 3 — Visibility Computation
+For each ground station, convert geodetic coordinates to ECEF using the WGS84 ellipsoid (`a = 6378.137 km`, `f = 1/298.257223563`). Compute the topocentric vector to the satellite and project it onto the station's local reference frame to get elevation and azimuth. Intervals where elevation > 0° are candidate passes.
 
-### `passes`
-Stores final pass windows and pass summary fields.
+### Phase 4 — AOS/LOS Refinement
+For each candidate interval edge (horizon crossing), run a 1-second resolution binary search to pin the exact AOS and LOS. Compute TCA (time of closest approach) as the instant of maximum elevation. Discard passes shorter than 5 seconds.
 
-### `job_runs`
-Stores lifecycle and progress of background jobs, especially initial pass computation.
+### Phase 5 — Persistence
+Batch-insert accepted passes into the `passes` TimescaleDB hypertable. Bulk insert mappings reduce DB round-trips and allow the background job to finish faster.
 
-## Storage And Indexing Strategy
-The most important data-structure choices are in the `passes` table:
-- hypertable on `aos`
-- composite index on `(station_id, aos)`
-- composite index on `(satellite_id, aos)`
-- overlap-supporting index on `(station_id, aos, los)`
+### Phase 6 — Scheduling
+**Station-level**: greedy interval scheduling sorted by earliest finish time — provably optimal for maximising non-overlapping pass count on a single resource.  
+**Network-level**: greedy heuristic across all station schedules, prioritising earliest-finishing passes while avoiding repeat coverage of the same satellite. Documented as a heuristic, not an exact global optimizer.
 
-These choices align with the actual query patterns:
-- station plus time-range queries
-- satellite plus time-range queries
-- schedule computation over overlapping intervals
+---
 
-## Computation Logic
-### TLE Ingestion
-The TLE ingestion flow is:
-1. fetch raw TLE text from CelesTrak
-2. parse `(name, norad_id, line1, line2, epoch, fetched_at)`
-3. upsert `satellites`
-4. upsert `tle_snapshots`
-5. mark the newest snapshot as current
+## Setup Instructions
 
-### Propagation Window
-Default configuration:
-- prediction horizon: 7 days
-- coarse step size: 60 seconds
-- minimum pass duration: 5 seconds
-- horizon threshold: elevation greater than 0 degrees
-
-### Pass Prediction Pipeline
-For each satellite:
-1. build a time grid for the future window
-2. propagate ECI positions using `sgp4_array()`
-3. convert positions from ECI to ECEF
-4. convert each station from geodetic coordinates to ECEF
-5. compute topocentric elevation and azimuth
-6. detect candidate visible intervals
-7. refine AOS and LOS at 1-second resolution
-8. compute TCA and max elevation
-9. store accepted passes in batches
-
-### Why 60-Second Sampling
-A 1-second grid across all satellites and all stations for seven days would be expensive for a prototype. The system uses a coarse 60-second scan to find candidate visibility windows, then refines only the edges at 1-second resolution.
-
-## Scheduling Logic
-### Station-Level Scheduling
-For a single station, the project uses greedy interval scheduling:
-- sort by earliest finish time
-- select a pass if it starts after the previously selected pass ends
-
-This is optimal for maximizing the count of non-overlapping passes on one station.
-
-### Network-Level Coverage
-For network reporting, the service computes a resource-feasible greedy heuristic across station schedules. This is not presented as a mathematically exact global optimizer, but it directly addresses the PDF requirement to reason about network-level tracking coverage.
-
-## Cold Start Behavior
-Cold start is an explicit design concern in this project.
-
-On a fresh launch:
-- the API starts immediately
-- initialization runs in the background
-- `/status` returns `202` while computation is running
-- `/passes` becomes queryable as batches are inserted
-
-If the pass job fails:
-- `/status` returns `503`
-- failure information is preserved in `job_runs`
-
-## Setup
 ### Prerequisites
-You need:
-- Docker with Compose support
-- internet access to `https://celestrak.org`
+- Docker with Compose v2
+- Internet access to `https://celestrak.org`
 
-### Start The Project
-From the repository root:
+### Start
+
 ```bash
 docker compose up --build
 ```
 
-Services:
-- API: `http://localhost:8000`
-- Postgres: `localhost:5432`
-- Redis: `localhost:6379`
+| Service | URL |
+|---|---|
+| API | `http://localhost:8000` |
+| API Docs | `http://localhost:8000/docs` |
+| Postgres | `localhost:5432` |
+| Redis | `localhost:6379` |
 
 ### Clean Restart
-To recreate everything from scratch:
+
 ```bash
-docker compose down -v
-docker compose up --build
+docker compose down -v && docker compose up --build
 ```
 
-## Startup Sequence
-The startup path is:
-1. dependency readiness check
-2. Alembic migration
-3. job-state restoration
-4. station seeding
-5. TLE refresh if missing or stale
-6. initial pass compute trigger if required
-7. APScheduler startup for 24-hour refresh
+### Logs
+
+```bash
+docker compose logs -f api
+```
+
+---
 
 ## API Reference
-### `GET /health`
-Purpose:
-- report DB status, Redis status, last TLE fetch time, and pass computation state
 
-### `GET /status`
-Purpose:
-- report initialization and backfill progress
+| Endpoint | Description |
+|---|---|
+| `GET /health` | DB + Redis status, last TLE fetch, computation state |
+| `GET /status` | Background job progress percentage |
+| `GET /stations` | List all 50 seeded ground stations |
+| `GET /passes` | Pass windows filtered by station and time range |
+| `GET /schedule/{station_code}` | Non-overlapping greedy schedule for a station |
+| `GET /network/summary` | Network-wide coverage and tracking metrics |
 
-Returns:
-- `state`
-- `total_satellites`
-- `total_passes_computed`
-- `computation_progress_percent`
-- `started_at`
-- `finished_at`
+### Example Requests
 
-### `GET /stations`
-Purpose:
-- list the 50 seeded stations
-
-### `GET /passes`
-Purpose:
-- return pass windows for a station in a requested time range
-
-Query params:
-- `station_id` or `station_code`
-- `start`
-- `end`
-- optional `satellite_id`
-- optional `limit`
-- optional `offset`
-
-### `GET /schedule/{station_code}`
-Purpose:
-- return the station-level non-overlapping schedule for a time window
-
-### `GET /network/summary`
-Purpose:
-- return network-wide pass counts, scheduled counts, and coverage metrics
-
-## Example Requests
-```text
+```bash
 GET /health
 GET /status
 GET /stations
@@ -297,43 +180,44 @@ GET /schedule/STN001?start=2026-03-18T00:00:00Z&end=2026-03-19T00:00:00Z
 GET /network/summary?start=2026-03-18T00:00:00Z&end=2026-03-19T00:00:00Z
 ```
 
-## Testing And Validation
-The repository includes:
-- unit tests for TLE parsing, propagation helpers, scheduling, and status math
-- integration-oriented API tests
-- sample JSON outputs in `samples/`
+Sample JSON responses for each endpoint are available in [`samples/`](./samples/).
 
-Recommended validation flow after startup:
-1. call `/health`
-2. call `/status`
-3. confirm `/stations` returns 50 records
-4. query `/passes` for `STN001`
-5. query `/schedule/STN001`
-6. query `/network/summary`
+---
 
-## Trade-Offs
-### TimescaleDB Instead Of SQLite
-This problem is naturally time-series oriented, and the evaluation emphasizes efficient data structures and query performance. TimescaleDB is a stronger fit.
+## Trade-offs and Design Decisions
 
-### Pass Windows Instead Of Raw Propagated Positions
-The system stores final pass outputs rather than every propagated state vector to keep storage size manageable.
+| Decision | Choice | Reason |
+|---|---|---|
+| Database | TimescaleDB over SQLite/Postgres | Native time-series partitioning; hypertables keep index sizes small |
+| Storage granularity | Pass windows, not raw position vectors | Manageable storage; raw vectors would be orders of magnitude larger |
+| Worker model | `ProcessPoolExecutor` over Celery | Keeps deployment simple; still exploits multiple CPU cores |
+| Scheduling algorithm | Greedy by EFT over ILP solver | Exact for count-maximisation on one resource; O(P log P) vs exponential |
+| Refresh mechanism | APScheduler in-process over Celery Beat | No extra services required for a prototype scope |
+| Cold-start safety | Background computation, API available immediately | Status endpoint provides progress; passes queryable as batches land |
 
-### `ProcessPoolExecutor` Instead Of Celery
-This keeps the prototype easy to run while still showing multi-process computation. A queue-based worker system is the next production step.
+---
 
-### Greedy Scheduling
-Greedy scheduling is exact for station-level interval selection and easy to explain. The network-level logic is a documented heuristic rather than an overstated exact optimizer.
+## Repository Structure
 
-## Limitations
-This is still a prototype. The intentional boundaries are:
-- no distributed worker queue
-- no formal latency benchmark proving exact sub-second behavior at very large scale
-- no globally optimal network-wide mathematical scheduler
-- no authentication or multi-tenant concerns
-
-## Supporting Documents
-- `ARCHITECTURE.md` contains deeper design notes and scalability discussion
-- `samples/` contains representative API-style outputs
-
-## Summary
-This project is a self-contained backend prototype for satellite pass prediction and network coverage analysis. It combines live orbital data ingestion, SGP4 propagation, visibility geometry, time-series storage, scheduling logic, and query APIs into a single service that can be started with Docker and evaluated end to end.
+```
+app/
+  main.py           — startup lifecycle and route registration
+  config.py         — environment variable config
+  models.py         — SQLAlchemy ORM models
+  schemas.py        — Pydantic request/response schemas
+  seeds/            — ground_stations.json
+  services/
+    orchestration.py  — startup sequencing and job lifecycle
+    tle.py            — CelesTrak fetch and parse
+    pass_prediction.py — SGP4 propagation and visibility geometry
+    scheduling.py     — greedy interval scheduler
+    status.py         — job progress computation
+    redis_state.py    — distributed lock helpers
+alembic/            — database migrations
+samples/            — representative JSON outputs
+tests/              — unit and integration tests
+ARCHITECTURE.md     — scalability roadmap and deep design notes
+docker-compose.yml
+Dockerfile
+requirements.txt
+```
