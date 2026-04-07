@@ -221,3 +221,45 @@ docker-compose.yml
 Dockerfile
 requirements.txt
 ```
+
+---
+
+## Running Tests
+
+### Unit tests (no Docker required)
+
+Install dependencies once:
+
+```bash
+pip install -r requirements.txt
+```
+
+Run all unit tests:
+
+```bash
+pytest tests/unit/
+```
+
+`conftest.py` sets `DATABASE_URL` to an in-memory SQLite instance and `SKIP_STARTUP_TASKS=true`, so no external services are needed.
+
+### Integration tests (stack must be running)
+
+Start the stack first:
+
+```bash
+docker compose up --build
+```
+
+Then, in a separate terminal:
+
+```bash
+pytest tests/integration/
+```
+
+These tests hit the live API at `http://localhost:8000`, so the stack must be healthy before running them.
+
+### Run everything at once
+
+```bash
+pytest
+```
