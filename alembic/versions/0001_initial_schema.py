@@ -54,27 +54,36 @@ def upgrade() -> None:
     )
     op.create_index("ix_tle_snapshots_satellite_id", "tle_snapshots", ["satellite_id"], unique=False)
 
-    op.create_table(
-        "passes",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("station_id", sa.Integer(), sa.ForeignKey("ground_stations.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("satellite_id", sa.Integer(), sa.ForeignKey("satellites.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("tle_snapshot_id", sa.Integer(), sa.ForeignKey("tle_snapshots.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("aos", sa.DateTime(timezone=True), primary_key=True, nullable=False),
-        sa.Column("los", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("tca", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("max_elevation_deg", sa.Float(), nullable=False),
-        sa.Column("duration_seconds", sa.Float(), nullable=False),
-        sa.Column("aos_azimuth_deg", sa.Float(), nullable=True),
-        sa.Column("los_azimuth_deg", sa.Float(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.UniqueConstraint("station_id", "satellite_id", "tle_snapshot_id", "aos", name="uq_pass_identity"),
-    )
-    op.create_index("ix_passes_aos", "passes", ["aos"], unique=False)
+    # Create passes table as a regular PostgreSQL table
+    op.execute("""
+        CREATE TABLE passes (
+            id INT,
+            station_id INT NOT NULL,
+            satellite_id INT NOT NULL,
+            tle_snapshot_id INT NOT NULL,
+            aos TIMESTAMPTZ NOT NULL,
+            los TIMESTAMPTZ NOT NULL,
+            tca TIMESTAMPTZ NOT NULL,
+            max_elevation_deg FLOAT NOT NULL,
+            duration_seconds FLOAT NOT NULL,
+            aos_azimuth_deg FLOAT,
+            los_azimuth_deg FLOAT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (aos, station_id, satellite_id, tle_snapshot_id),
+            CONSTRAINT fk_passes_station_id FOREIGN KEY (station_id) REFERENCES ground_stations(id) ON DELETE CASCADE,
+            CONSTRAINT fk_passes_satellite_id FOREIGN KEY (satellite_id) REFERENCES satellites(id) ON DELETE CASCADE,
+            CONSTRAINT fk_passes_tle_snapshot_id FOREIGN KEY (tle_snapshot_id) REFERENCES tle_snapshots(id) ON DELETE CASCADE,
+            CONSTRAINT uq_pass_identity UNIQUE (station_id, satellite_id, tle_snapshot_id, aos)
+        )
+    """)
+    
+    # Create indexes
     op.create_index("ix_passes_station_aos", "passes", ["station_id", "aos"], unique=False)
     op.create_index("ix_passes_satellite_aos", "passes", ["satellite_id", "aos"], unique=False)
     op.create_index("ix_passes_station_aos_los", "passes", ["station_id", "aos", "los"], unique=False)
-    op.execute("SELECT create_hypertable('passes', 'aos', if_not_exists => TRUE)")
+    
+    # Create hypertable
+    op.execute("SELECT create_hypertable('passes'::regclass, 'aos'::name, if_not_exists => true)")
 
     op.create_table(
         "job_runs",
@@ -101,7 +110,6 @@ def downgrade() -> None:
     op.drop_index("ix_passes_station_aos_los", table_name="passes")
     op.drop_index("ix_passes_satellite_aos", table_name="passes")
     op.drop_index("ix_passes_station_aos", table_name="passes")
-    op.drop_index("ix_passes_aos", table_name="passes")
     op.drop_table("passes")
 
     op.drop_index("ix_tle_snapshots_satellite_id", table_name="tle_snapshots")

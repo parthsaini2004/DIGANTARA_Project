@@ -1,6 +1,6 @@
 services:
   db:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb:2.14.2-pg16
     environment:
       POSTGRES_DB: passes
       POSTGRES_USER: postgres
@@ -38,6 +38,7 @@ services:
       TLE_REFRESH_HOURS: 24
       WORKER_PROCESSES: 2
       SATELLITE_CHUNK_SIZE: 20
+      
     ports:
       - "8000:8000"
     depends_on:

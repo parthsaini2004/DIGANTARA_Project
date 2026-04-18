@@ -55,10 +55,10 @@ class Pass(Base):
         Index("ix_passes_station_aos_los", "station_id", "aos", "los"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    station_id: Mapped[int] = mapped_column(ForeignKey("ground_stations.id", ondelete="CASCADE"), nullable=False)
-    satellite_id: Mapped[int] = mapped_column(ForeignKey("satellites.id", ondelete="CASCADE"), nullable=False)
-    tle_snapshot_id: Mapped[int] = mapped_column(ForeignKey("tle_snapshots.id", ondelete="CASCADE"), nullable=False)
+    id: Mapped[int] = mapped_column(Integer, nullable=False)
+    station_id: Mapped[int] = mapped_column(ForeignKey("ground_stations.id", ondelete="CASCADE"), primary_key=True)
+    satellite_id: Mapped[int] = mapped_column(ForeignKey("satellites.id", ondelete="CASCADE"), primary_key=True)
+    tle_snapshot_id: Mapped[int] = mapped_column(ForeignKey("tle_snapshots.id", ondelete="CASCADE"), primary_key=True)
     aos: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, nullable=False, index=True)
     los: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     tca: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
