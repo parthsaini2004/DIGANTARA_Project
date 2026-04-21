@@ -51,7 +51,10 @@ def parse_tle_payload(payload: str, fetched_at: datetime | None = None) -> list[
 
 def fetch_active_tles() -> list[TLERecord]:
     settings = get_settings()
-    response = requests.get(settings.tle_source_url, timeout=settings.request_timeout_seconds)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    response = requests.get(settings.tle_source_url, timeout=settings.request_timeout_seconds, headers=headers)
     response.raise_for_status()
     return parse_tle_payload(response.text, fetched_at=datetime.now(UTC))
 

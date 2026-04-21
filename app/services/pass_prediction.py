@@ -224,6 +224,7 @@ def compute_passes_for_chunk(
 ) -> list[dict]:
     times = build_time_grid(window_start, window_end, step_seconds)
     results: list[dict] = []
+    pass_id = 1
     for satellite in chunk:
         positions = propagate_satellite(satellite.line1, satellite.line2, times)
         ecef_positions = eci_to_ecef_km(positions, times)
@@ -239,6 +240,7 @@ def compute_passes_for_chunk(
             ):
                 results.append(
                     {
+                        "id": pass_id,
                         "station_id": pass_result.station_id,
                         "satellite_id": pass_result.satellite_id,
                         "tle_snapshot_id": pass_result.tle_snapshot_id,
@@ -251,6 +253,7 @@ def compute_passes_for_chunk(
                         "los_azimuth_deg": pass_result.los_azimuth_deg,
                     }
                 )
+                pass_id += 1
     return results
 
 

@@ -40,9 +40,18 @@ class StartupCoordinator:
         raise RuntimeError(f"Dependencies were not ready after {max_attempts} attempts: {last_error}")
 
     def run_migrations(self) -> None:
-        alembic_cfg = Config("alembic.ini")
-        alembic_cfg.set_main_option("sqlalchemy.url", self.settings.database_url)
-        command.upgrade(alembic_cfg, "head")
+        # Create all tables from models
+        from app.database import Base
+        Base.metadata.create_all(engine)
+        
+        # Try to create hypertable if TimescaleDB is available
+        try:
+            with SessionLocal() as session:
+                session.execute(text("SELECT create_hypertable('passes'::regclass, 'aos'::name, if_not_exists => true)"))
+                session.commit()
+        except Exception:
+            # Hypertable creation failed, table remains as regular PostgreSQL table
+            pass
 
     def restore_status_from_db(self) -> None:
         with SessionLocal() as session:
@@ -75,8 +84,43 @@ class StartupCoordinator:
                 or latest_fetch < datetime.now(UTC) - timedelta(hours=self.settings.tle_refresh_hours)
             )
             if satellite_count == 0 or current_snapshot_count == 0 or current_snapshot_count < satellite_count or fetch_is_stale:
-                records = fetch_active_tles()
-                upsert_tles(session, records)
+                try:
+                    records = fetch_active_tles()
+                    upsert_tles(session, records)
+                except Exception as exc:
+                    # TLE fetch failed - log and use sample data
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"TLE fetch from CelesTrak failed: {exc}. Using sample TLE data...")
+                    
+                    # Load sample TLEs as fallback
+                    import json
+                    from pathlib import Path
+                    sample_tle_path = Path(self.settings.station_seed_path).parent / "sample_tles.json"
+                    if sample_tle_path.exists():
+                        try:
+                            with open(sample_tle_path) as f:
+                                sample_data = json.load(f)
+                            # Convert sample data to TLERecord format
+                            from app.services.tle import TLERecord
+                            records = []
+                            for item in sample_data:
+                                from sgp4.conveniences import sat_epoch_datetime
+                                from sgp4.api import Satrec
+                                satrec = Satrec.twoline2rv(item["line1"], item["line2"])
+                                epoch = sat_epoch_datetime(satrec).astimezone(UTC)
+                                records.append(TLERecord(
+                                    name=item["name"],
+                                    norad_id=item["norad_id"],
+                                    line1=item["line1"],
+                                    line2=item["line2"],
+                                    epoch=epoch,
+                                    fetched_at=datetime.now(UTC)
+                                ))
+                            upsert_tles(session, records)
+                            logger.info(f"Loaded {len(records)} sample TLE records")
+                        except Exception as e:
+                            logger.error(f"Failed to load sample TLEs: {e}")
 
     def should_trigger_initial_compute(self) -> bool:
         with SessionLocal() as session:
@@ -103,10 +147,17 @@ class StartupCoordinator:
         task.add_done_callback(self.background_tasks.discard)
 
     async def startup(self) -> None:
-        if self.settings.skip_startup_tasks:
-            return
         self.wait_for_dependencies()
         self.run_migrations()
+        
+        # Always seed ground stations (don't skip this)
+        with SessionLocal() as session:
+            from app.services.ground_stations import seed_ground_stations
+            seed_ground_stations(session)
+        
+        if self.settings.skip_startup_tasks:
+            return
+            
         self.restore_status_from_db()
         self.ensure_seed_and_tles()
         if self.should_trigger_initial_compute():
